@@ -9,9 +9,9 @@ import os
 import base64
 from openai import OpenAI
 
-# ═══════════════════════════════════════════
+# ═══════════════════════════
 # 品牌知识库
-# ═══════════════════════════════════════════
+# ═══════════════════════════
 
 BRAND = {
     "name": "RicoVea",
@@ -37,25 +37,47 @@ SCENE_KEYWORDS = [
     "户外露营", "闺蜜聚会",
 ]
 
-# ═══════════════════════════════════════════
+# ═══════════════════════════
 # 千问 API
-# ═══════════════════════════════════════════
+# ═══════════════════════════
 
 DASHSCOPE_BASE = "https://dashscope.aliyuncs.com"
 API_KEY = os.environ.get("DASHSCOPE_API_KEY", "")
 
-def get_client():
-    if not API_KEY:
-        return None
-    return OpenAI(api_key=API_KEY, base_url=f"{DASHSCOPE_BASE}/compatible-mode/v1")
+
+def ai_recognize_product(image_path, api_key):
+    """上传产品图 → 千问视觉识别 → 返回产品信息"""
+    if not api_key:
+        return {"error": "请先输入 API Key"}
+    client = OpenAI(api_key=api_key, base_url=f"{DASHSCOPE_BASE}/compatible-mode/v1")
+    with open(image_path, "rb") as f:
+        img_b64 = base64.b64encode(f.read()).decode("utf-8")
+    
+    prompt = """请观察这件服装产品图片，提取以下信息，用 JSON 返回：
+{"product_name": "产品名称（如：廓形西装外套）", "selling_points": "产品卖点（面料、设计细节、廓形特征）", "scene": "场景风格（从以下选择1个：日常通勤、甜酷平衡、休闲街头、周末松弛、约会派对、独处时光、城市漫游、创意场合、出行社交、晚间微醺、户外露营、闺蜜聚会）"}
+只返回 JSON。"""
+    
+    r = client.chat.completions.create(
+        model="qwen-vl-plus",
+        messages=[{"role": "user", "content": [
+            {"type": "text", "text": prompt},
+            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}}
+        ]}],
+        max_tokens=300,
+    )
+    content = r.choices[0].message.content.strip()
+    content = content.replace("```json", "").replace("```", "").strip()
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError:
+        return {"error": "识别失败", "raw": content[:200]}
 
 
-def ai_generate(name, selling_points, scene, api_key_override=None):
+def ai_generate(name, selling_points, scene, api_key):
     """AI 生成4种文案，每种3个变体"""
-    key = api_key_override or API_KEY
-    if not key:
+    if not api_key:
         return None
-    client = OpenAI(api_key=key, base_url=f"{DASHSCOPE_BASE}/compatible-mode/v1")
+    client = OpenAI(api_key=api_key, base_url=f"{DASHSCOPE_BASE}/compatible-mode/v1")
     
     style_info = STYLE_QUADRANTS.get(scene, {})
     mood = style_info.get("mood", "自在")
@@ -109,30 +131,29 @@ def template_generate(name, selling_points, scene):
             f"穿回自己·{name[:3]}",
         ],
         "详情页商品解析": [
-            f"{selling_points or name}，{kw}。{scene}里的{mood}。",
+            f"{selling_points or name}，{kw}。{scene}里的{mood[:4]}。",
             f"利落剪裁，{kw}。一件融入日常的{name}。",
-            f"{name}以流畅廓形承载{mood}。不费力。",
+            f"{name}以流畅廓形承载{mood[:4]}。不费力。",
         ],
         "详情页风格文案": [
-            f"{name}——{scene}中的{mood}。为你的日常衣橱注入不费力的设计感。",
-            f"我们在{name}中寻找廓形与身体之间更自在的结合。{mood}。",
-            f"一件{name}，让你在{scene}里穿回自己。{kw}，自然而然。",
+            f"{name}——{scene}中的{mood[:4]}。为日常衣橱注入设计感。",
+            f"我们在{name}中寻找廓形与身体之间更自在的结合。",
+            f"一件{name}，让你在{scene}里穿回自己。{kw}。",
         ],
         "小红书种草文案": [
-            f"这件{name}上身才知道什么叫「{mood}」。{scene}穿它准没错。",
+            f"这件{name}上身才知道什么叫「{mood[:4]}」。{scene}穿它准没错。",
             f"居然被一件{name}治好了选择困难。{kw}，不用多想就能出门。",
-            f"穿了一周的{name}，{mood}。不是衣服在穿你，是你在穿衣服。",
+            f"穿了一周的{name}，{mood[:4]}。是你在穿衣服。",
         ],
     }
 
 
-def generate(name, selling_points, scene, api_key_override=""):
+def generate(name, selling_points, scene, api_key):
     if not name.strip():
         empty = {"产品标题参考": [""]*3, "详情页商品解析": [""]*3, "详情页风格文案": [""]*3, "小红书种草文案": [""]*3}
         return format_output(empty)
     
-    # Try AI first
-    result = ai_generate(name, selling_points, scene, api_key_override)
+    result = ai_generate(name, selling_points, scene, api_key)
     if result is None:
         result = template_generate(name, selling_points, scene)
     
@@ -140,10 +161,8 @@ def generate(name, selling_points, scene, api_key_override=""):
 
 
 def format_output(result):
-    """将4x3的结果格式化为4个文本框"""
     def fmt(arr):
         return "\n\n".join(f"{i+1}. {a}" for i, a in enumerate(arr))
-    
     return (
         fmt(result.get("产品标题参考", [])),
         fmt(result.get("详情页商品解析", [])),
@@ -152,36 +171,22 @@ def format_output(result):
     )
 
 
-# ═══════════════════════════════════════════
+# ═══════════════════════════
 # Gradio 界面
-# ═══════════════════════════════════════════
+# ═══════════════════════════
 
 CUSTOM_CSS = """
-.gradio-container {
-    max-width: 720px !important;
-    margin: 0 auto !important;
-    background: #fff !important;
-    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "苹方", sans-serif !important;
-}
+.gradio-container { max-width: 720px !important; margin: 0 auto !important; background: #fff !important; font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "苹方", sans-serif !important; }
 body, .gradio-container, .app { background: #fff !important; }
 h1, h2, h3 { color: #1D1D1B !important; font-weight: 400 !important; }
 label, .label-text { color: #666 !important; font-size: 0.82em !important; font-weight: 400 !important; }
-input, textarea, select {
-    border: 1px solid #e0e0e0 !important; border-radius: 4px !important;
-    background: #fafafa !important; color: #1D1D1B !important; font-size: 0.92em !important;
-}
+input, textarea, select { border: 1px solid #e0e0e0 !important; border-radius: 4px !important; background: #fafafa !important; color: #1D1D1B !important; font-size: 0.92em !important; }
 input:focus, textarea:focus { border-color: #ebd1cc !important; outline: none !important; box-shadow: 0 0 0 1px #ebd1cc !important; }
-button, .gr-button-primary {
-    background: #1D1D1B !important; color: #fff !important; border: none !important;
-    border-radius: 4px !important; font-size: 0.92em !important; padding: 8px 28px !important; letter-spacing: 0.05em;
-}
+button, .gr-button-primary { background: #1D1D1B !important; color: #fff !important; border: none !important; border-radius: 4px !important; font-size: 0.92em !important; padding: 8px 28px !important; letter-spacing: 0.05em; }
 button:hover { background: #333 !important; }
-.preview-box {
-    background: #fafafa !important; border: 1px solid #e8e8e8 !important; border-radius: 6px !important;
-    padding: 16px !important; color: #1D1D1B !important; font-size: 0.9em !important;
-    line-height: 1.8 !important; white-space: pre-wrap !important; min-height: 120px !important;
-}
+.preview-box { background: #fafafa !important; border: 1px solid #e8e8e8 !important; border-radius: 6px !important; padding: 16px !important; color: #1D1D1B !important; font-size: 0.9em !important; line-height: 1.8 !important; white-space: pre-wrap !important; min-height: 120px !important; }
 .footer { text-align: center; color: #999; font-size: 0.7em; margin-top: 16px; }
+.recognize-section { background: #f5f0ff !important; padding: 12px !important; border-radius: 6px !important; margin-bottom: 12px !important; }
 """
 
 BRAND_HEADER = """
@@ -198,6 +203,22 @@ def build_ui():
     with gr.Blocks(title="RicoVea 文案生成器", theme=gr.themes.Soft()) as app:
         gr.HTML(BRAND_HEADER)
 
+        # ── 上传产品图自动识别 ──
+        with gr.Row():
+            with gr.Column():
+                product_image = gr.Image(label="上传产品图", type="filepath", height=200)
+            with gr.Column():
+                gr.Markdown("### 视觉模型 API Key")
+                api_key = gr.Textbox(
+                    label="DashScope API Key",
+                    placeholder="sk-...",
+                    type="password",
+                )
+                recognize_btn = gr.Button("🔍 AI 识别产品信息", variant="secondary")
+                recognize_status = gr.Markdown("")
+
+        # ── 产品信息 ──
+        gr.Markdown("### 产品信息")
         with gr.Row(equal_height=True):
             with gr.Column(scale=2):
                 product_name = gr.Textbox(
@@ -243,19 +264,41 @@ def build_ui():
                 gr.Markdown("*3 种，各 ≤30 字*")
                 output_xhs = gr.Textbox(label="", lines=6, elem_classes=["preview-box"])
 
+        # ── 事件绑定 ──
+
+        def do_recognize(img, key):
+            if img is None:
+                return "", "", "日常通勤", "⚠️ 请先上传产品图"
+            result = ai_recognize_product(img, key)
+            if "error" in result:
+                return "", "", "日常通勤", f"❌ {result['error']}"
+            name = result.get("product_name", "")
+            points = result.get("selling_points", "")
+            scene = result.get("scene", "日常通勤")
+            if scene not in SCENE_KEYWORDS:
+                scene = "日常通勤"
+            status = f"✅ 识别完成：{name} | {scene}"
+            return name, points, scene, status
+
+        recognize_btn.click(
+            fn=do_recognize,
+            inputs=[product_image, api_key],
+            outputs=[product_name, selling_points, scene_selector, recognize_status],
+        )
+
         generate_btn.click(
             fn=generate,
-            inputs=[product_name, selling_points, scene_selector],
+            inputs=[product_name, selling_points, scene_selector, api_key],
             outputs=[output_title, output_parse, output_style, output_xhs],
         )
 
         def clear_all():
-            return "", "", "日常通勤", "", "", "", ""
+            return None, "", "", "", "日常通勤", "", "", "", "", ""
 
         clear_btn.click(
             fn=clear_all,
-            inputs=[], outputs=[product_name, selling_points, scene_selector,
-                               output_title, output_parse, output_style, output_xhs],
+            inputs=[], outputs=[product_image, api_key, product_name, selling_points, scene_selector,
+                               output_title, output_parse, output_style, output_xhs, recognize_status],
         )
 
         gr.HTML(FOOTER)
